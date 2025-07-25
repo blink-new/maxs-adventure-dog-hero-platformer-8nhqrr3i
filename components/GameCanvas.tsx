@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View,
   StyleSheet,
@@ -7,60 +7,99 @@ import {
   Text,
 } from 'react-native';
 import { useGame } from '@/contexts/GameContext';
+import { useGameEngine } from '@/hooks/useGameEngine';
+import { useSoundEffects } from '@/hooks/useSoundEffects';
 
 const { width, height } = Dimensions.get('window');
 
-interface GameObject {
-  id: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  type: 'player' | 'platform' | 'enemy' | 'collectible' | 'powerup';
-  sprite?: string;
-}
-
 export default function GameCanvas() {
-  const { gameState } = useGame();
-  const [cameraX, setCameraX] = useState(0);
-  const playerX = useRef(new Animated.Value(50)).current;
-  const playerY = useRef(new Animated.Value(300)).current;
+  const { gameState, updateGameState } = useGame();
+  const {
+    gameObjects,
+    animatedPlayerX,
+    animatedPlayerY,
+    animatedCameraX,
+    startGameLoop,
+    stopGameLoop,
+    resetGame,
+  } = useGameEngine();
+  const { playCollectSound, playPowerUpSound, playHitSound } = useSoundEffects();
 
-  // Game objects for level 1
-  const gameObjects: GameObject[] = [
-    // Platforms
-    { id: 'ground', x: 0, y: 400, width: 2000, height: 50, type: 'platform' },
-    { id: 'platform1', x: 200, y: 300, width: 150, height: 20, type: 'platform' },
-    { id: 'platform2', x: 400, y: 250, width: 150, height: 20, type: 'platform' },
-    { id: 'platform3', x: 600, y: 200, width: 150, height: 20, type: 'platform' },
-    
-    // Enemies
-    { id: 'enemy1', x: 300, y: 360, width: 40, height: 40, type: 'enemy', sprite: '🐱' },
-    { id: 'enemy2', x: 500, y: 210, width: 40, height: 40, type: 'enemy', sprite: '🐿️' },
-    
-    // Collectibles
-    { id: 'bone1', x: 250, y: 270, width: 30, height: 30, type: 'collectible', sprite: '🦴' },
-    { id: 'bone2', x: 450, y: 220, width: 30, height: 30, type: 'collectible', sprite: '🦴' },
-    { id: 'bone3', x: 650, y: 170, width: 30, height: 30, type: 'collectible', sprite: '🦴' },
-    
-    // Power-ups
-    { id: 'powerup1', x: 350, y: 260, width: 35, height: 35, type: 'powerup', sprite: '⚡' },
-  ];
+  const gameLoopStarted = useRef(false);
 
-  const renderGameObject = (obj: GameObject) => {
-    const isVisible = obj.x + obj.width > cameraX && obj.x < cameraX + width;
-    
-    if (!isVisible) return null;
+  useEffect(() => {
+    if (gameState.isPlaying && !gameState.isPaused && !gameLoopStarted.current) {
+      gameLoopStarted.current = true;
+      startGameLoop(
+        (type: string, id: string, sprite?: string) => {
+          // Handle collectibles
+          if (type === 'collectible') {
+            playCollectSound();
+            updateGameState({
+              score: gameState.score + 100,
+              coins: gameState.coins + 1,
+            });
+          } else if (type === 'powerup') {
+            playPowerUpSound();
+            const powerUpType = sprite === '🔥' ? 'fireball' : 
+                              sprite === '🌪️' ? 'spin' : 'jump';
+            updateGameState({
+              score: gameState.score + 200,
+              powerUps: [...gameState.powerUps, powerUpType],
+            });
+          }
+        },
+        () => {
+          // Handle player hit
+          playHitSound();
+          const newLives = gameState.lives - 1;
+          updateGameState({ lives: newLives });
+          
+          if (newLives <= 0) {
+            // Game over
+            stopGameLoop();
+            gameLoopStarted.current = false;
+            updateGameState({ isPlaying: false });
+          }
+        }
+      );
+    } else if (!gameState.isPlaying || gameState.isPaused) {
+      stopGameLoop();
+      gameLoopStarted.current = false;
+    }
 
-    const screenX = obj.x - cameraX;
-    
+    return () => {
+      if (gameLoopStarted.current) {
+        stopGameLoop();
+        gameLoopStarted.current = false;
+      }
+    };
+  }, [gameState.isPlaying, gameState.isPaused, startGameLoop, stopGameLoop, updateGameState, gameState.score, gameState.coins, gameState.lives, gameState.powerUps]);
+
+  useEffect(() => {
+    if (!gameState.isPlaying && gameLoopStarted.current) {
+      resetGame();
+      gameLoopStarted.current = false;
+    }
+  }, [gameState.isPlaying, resetGame]);
+
+  const renderGameObject = (obj: any) => {
+    if (obj.collected) return null;
+
     return (
-      <View
+      <Animated.View
         key={obj.id}
         style={[
           styles.gameObject,
           {
-            left: screenX,
+            transform: [
+              {
+                translateX: Animated.subtract(
+                  new Animated.Value(obj.x),
+                  animatedCameraX
+                ),
+              },
+            ],
             top: obj.y,
             width: obj.width,
             height: obj.height,
@@ -69,9 +108,14 @@ export default function GameCanvas() {
         ]}
       >
         {obj.sprite && (
-          <Text style={styles.sprite}>{obj.sprite}</Text>
+          <Text style={[
+            styles.sprite,
+            obj.direction === -1 && styles.flippedSprite
+          ]}>
+            {obj.sprite}
+          </Text>
         )}
-      </View>
+      </Animated.View>
     );
   };
 
@@ -80,9 +124,7 @@ export default function GameCanvas() {
       case 'platform':
         return '#8B4513';
       case 'enemy':
-        return 'transparent';
       case 'collectible':
-        return 'transparent';
       case 'powerup':
         return 'transparent';
       default:
@@ -94,15 +136,160 @@ export default function GameCanvas() {
     <View style={styles.container}>
       {/* Background Elements */}
       <View style={styles.background}>
-        {/* Clouds */}
-        <Text style={[styles.cloud, { left: 100 - cameraX * 0.3, top: 50 }]}>☁️</Text>
-        <Text style={[styles.cloud, { left: 300 - cameraX * 0.3, top: 80 }]}>☁️</Text>
-        <Text style={[styles.cloud, { left: 500 - cameraX * 0.3, top: 60 }]}>☁️</Text>
+        {/* Clouds - parallax scrolling */}
+        <Animated.View
+          style={[
+            styles.cloud,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.3),
+                },
+              ],
+              left: 100,
+              top: 50,
+            },
+          ]}
+        >
+          <Text style={styles.cloudText}>☁️</Text>
+        </Animated.View>
         
-        {/* Trees */}
-        <Text style={[styles.tree, { left: 150 - cameraX * 0.5, top: 320 }]}>🌳</Text>
-        <Text style={[styles.tree, { left: 350 - cameraX * 0.5, top: 330 }]}>🌲</Text>
-        <Text style={[styles.tree, { left: 550 - cameraX * 0.5, top: 325 }]}>🌳</Text>
+        <Animated.View
+          style={[
+            styles.cloud,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.3),
+                },
+              ],
+              left: 300,
+              top: 80,
+            },
+          ]}
+        >
+          <Text style={styles.cloudText}>☁️</Text>
+        </Animated.View>
+
+        <Animated.View
+          style={[
+            styles.cloud,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.3),
+                },
+              ],
+              left: 500,
+              top: 60,
+            },
+          ]}
+        >
+          <Text style={styles.cloudText}>☁️</Text>
+        </Animated.View>
+
+        <Animated.View
+          style={[
+            styles.cloud,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.3),
+                },
+              ],
+              left: 800,
+              top: 70,
+            },
+          ]}
+        >
+          <Text style={styles.cloudText}>☁️</Text>
+        </Animated.View>
+        
+        {/* Trees - mid-ground parallax */}
+        <Animated.View
+          style={[
+            styles.tree,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.5),
+                },
+              ],
+              left: 150,
+              top: 320,
+            },
+          ]}
+        >
+          <Text style={styles.treeText}>🌳</Text>
+        </Animated.View>
+
+        <Animated.View
+          style={[
+            styles.tree,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.5),
+                },
+              ],
+              left: 350,
+              top: 330,
+            },
+          ]}
+        >
+          <Text style={styles.treeText}>🌲</Text>
+        </Animated.View>
+
+        <Animated.View
+          style={[
+            styles.tree,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.5),
+                },
+              ],
+              left: 550,
+              top: 325,
+            },
+          ]}
+        >
+          <Text style={styles.treeText}>🌳</Text>
+        </Animated.View>
+
+        <Animated.View
+          style={[
+            styles.tree,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.5),
+                },
+              ],
+              left: 750,
+              top: 335,
+            },
+          ]}
+        >
+          <Text style={styles.treeText}>🌲</Text>
+        </Animated.View>
+
+        <Animated.View
+          style={[
+            styles.tree,
+            {
+              transform: [
+                {
+                  translateX: Animated.multiply(animatedCameraX, -0.5),
+                },
+              ],
+              left: 1050,
+              top: 320,
+            },
+          ]}
+        >
+          <Text style={styles.treeText}>🌳</Text>
+        </Animated.View>
       </View>
 
       {/* Game Objects */}
@@ -113,8 +300,8 @@ export default function GameCanvas() {
         style={[
           styles.player,
           {
-            left: playerX,
-            top: playerY,
+            left: animatedPlayerX,
+            top: animatedPlayerY,
           },
         ]}
       >
@@ -124,7 +311,21 @@ export default function GameCanvas() {
       {/* Level Progress Indicator */}
       <View style={styles.progressContainer}>
         <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: '25%' }]} />
+          <Animated.View 
+            style={[
+              styles.progressFill, 
+              { 
+                width: Animated.multiply(
+                  Animated.divide(animatedCameraX, new Animated.Value(1600)),
+                  new Animated.Value(100)
+                ).interpolate({
+                  inputRange: [0, 100],
+                  outputRange: ['0%', '100%'],
+                  extrapolate: 'clamp',
+                })
+              }
+            ]} 
+          />
         </View>
         <Text style={styles.progressText}>Level 1 - City Park</Text>
       </View>
@@ -147,10 +348,14 @@ const styles = StyleSheet.create({
   },
   cloud: {
     position: 'absolute',
+  },
+  cloudText: {
     fontSize: 30,
   },
   tree: {
     position: 'absolute',
+  },
+  treeText: {
     fontSize: 40,
   },
   gameObject: {
@@ -161,6 +366,9 @@ const styles = StyleSheet.create({
   },
   sprite: {
     fontSize: 30,
+  },
+  flippedSprite: {
+    transform: [{ scaleX: -1 }],
   },
   player: {
     position: 'absolute',
